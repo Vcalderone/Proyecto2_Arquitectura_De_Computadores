@@ -9,8 +9,10 @@
 // - Nicolás Villegas <navillegas@miuandes.cl>
 
 module pochoco_soc #(
-  parameter NumWords   = 512,
-  parameter MemFile    = "../sw/blink.hex"
+  parameter NumWords       = 512,
+  parameter MemFile        = "../sw/blink.hex",
+  parameter CyclesPerTenth = 2_500_000,
+  parameter DebounceTicks  = 3
 ) (
   input  wire       i_Clk,
 
@@ -102,7 +104,10 @@ module pochoco_soc #(
   // Peripherals
   wire [6:0] seg1, seg2;
 
-  pochoco_periph u_periph (
+  pochoco_periph #(
+    .CyclesPerTenth (CyclesPerTenth),
+    .DebounceTicks  (DebounceTicks)
+  ) u_periph (
     .clk_i     (clk),
     .rst_ni    (rst_ni),
     .sel_i     (per_sel),
@@ -117,21 +122,14 @@ module pochoco_soc #(
     .seg2_o    (seg2)
   );
 
-  // SPI Slave
-  pochoco_spi_slave u_spi (
-    .clk_i      (clk),
-    .rst_ni     (rst_ni),
-    .sel_i      (spi_sel),
-    .req_i      (spi_req),
-    .we_i       (data_we),
-    .addr_i     (data_addr[7:0]),
-    .wdata_i    (data_wdata),
-    .rdata_o    (spi_rdata),
-    .spi_sclk_i (i_SPI_SCLK),
-    .spi_mosi_i (i_SPI_MOSI),
-    .spi_cs_n_i (i_SPI_CS_n),
-    .spi_miso_o (o_SPI_MISO)
-  );
+  // SPI Slave: no se usa en este proyecto (ver docs/memory_map.md, "Espacio
+  // de direcciones"). pochoco_spi_slave.v se deja sin instanciar -- cuesta
+  // ~86 LCs que no sobran en la HX1K -- pero el archivo queda intacto por
+  // si algún día hace falta. Los pines de la Go Board se dejan atados a un
+  // valor fijo para no romper las restricciones de goboard.pcf.
+  assign spi_rdata  = 32'b0;
+  assign o_SPI_MISO = 1'b1;
+  wire _unused_spi = &{1'b0, i_SPI_SCLK, i_SPI_MOSI, i_SPI_CS_n};
 
   // 7-seg is active-low on the board
   assign {o_Segment1_G, o_Segment1_F, o_Segment1_E, o_Segment1_D,

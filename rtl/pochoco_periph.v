@@ -8,7 +8,10 @@
 // Authors:
 // - Nicolás Villegas <navillegas@miuandes.cl>
 
-module pochoco_periph (
+module pochoco_periph #(
+  parameter CyclesPerTenth = 2_500_000,  // 25 MHz / 10 Hz
+  parameter DebounceTicks  = 3           // muestras estables para aceptar un cambio
+) (
   input  wire        clk_i,
   input  wire        rst_ni,
   input  wire        sel_i,
@@ -25,6 +28,48 @@ module pochoco_periph (
 
   wire [5:0] off    = addr_i[7:2];
   wire       access = sel_i & req_i;
+
+  // Debounce de los botones: se intercala entre btn_i y la lectura del
+  // offset 2. Offsets 0/1/2 mantienen la misma dirección y semántica de
+  // siempre; lo único que cambia es que el offset 2 ya no ve el nivel
+  // crudo sino el filtrado.
+  wire [3:0] btn_clean;
+
+  debounce4 #(
+    .Ticks   (DebounceTicks),
+    .DivBits (15)
+  ) u_debounce (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .raw_i   (btn_i),
+    .clean_o (btn_clean)
+  );
+
+  // CYCLES: contador libre de ciclos a 25 MHz. TENTHS: contador libre de
+  // décimas de segundo, vía un comparador exacto contra CyclesPerTenth
+  // (no es potencia de 2, así que no sirve el truco del acarreo). Los
+  // dos de solo lectura, sin start/stop/clear por software.
+  localparam integer TenthCntW = $clog2(CyclesPerTenth);
+
+  reg [31:0]           cycles_q;
+  reg [TenthCntW-1:0]  tenth_cnt;
+  reg [31:0]           tenths_q;
+
+  always @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      cycles_q  <= 32'b0;
+      tenth_cnt <= {TenthCntW{1'b0}};
+      tenths_q  <= 32'b0;
+    end else begin
+      cycles_q <= cycles_q + 32'd1;
+      if (tenth_cnt == CyclesPerTenth - 1) begin
+        tenth_cnt <= {TenthCntW{1'b0}};
+        tenths_q  <= tenths_q + 32'd1;
+      end else begin
+        tenth_cnt <= tenth_cnt + 1'b1;
+      end
+    end
+  end
 
   // LEDs and raw digit registers
   reg [3:0]  led_q;
@@ -79,7 +124,9 @@ module pochoco_periph (
     if (!rst_ni) rdata_o <= 32'b0;
     else if (access & ~we_i) begin
       case (off)
-        6'd2: rdata_o <= {28'b0, btn_i}; // Buttons
+        6'd2: rdata_o <= {28'b0, btn_clean}; // Buttons, debounced
+        6'd3: rdata_o <= cycles_q;           // CYCLES
+        6'd4: rdata_o <= tenths_q;           // TENTHS
         default: rdata_o <= 32'b0;
       endcase
     end
