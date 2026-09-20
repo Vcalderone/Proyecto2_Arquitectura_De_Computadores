@@ -9,8 +9,8 @@
 // - Nicolás Villegas <navillegas@miuandes.cl>
 
 module pochoco_periph #(
-  parameter CyclesPerTenth = 2_500_000,  // 25 MHz / 10 Hz
-  parameter DebounceTicks  = 3           // muestras estables para aceptar un cambio
+  parameter DebounceTicks   = 3,         // muestras estables para aceptar un cambio
+  parameter DebounceDivBits = 15
 ) (
   input  wire        clk_i,
   input  wire        rst_ni,
@@ -35,39 +35,38 @@ module pochoco_periph #(
   // crudo sino el filtrado.
   wire [3:0] btn_clean;
 
-  debounce4 #(
-    .Ticks   (DebounceTicks),
-    .DivBits (15)
-  ) u_debounce (
-    .clk_i   (clk_i),
-    .rst_ni  (rst_ni),
-    .raw_i   (btn_i),
-    .clean_o (btn_clean)
-  );
-
-  // CYCLES: contador libre de ciclos a 25 MHz. TENTHS: contador libre de
-  // décimas de segundo, vía un comparador exacto contra CyclesPerTenth
-  // (no es potencia de 2, así que no sirve el truco del acarreo). Los
-  // dos de solo lectura, sin start/stop/clear por software.
-  localparam integer TenthCntW = $clog2(CyclesPerTenth);
-
-  reg [31:0]           cycles_q;
-  reg [TenthCntW-1:0]  tenth_cnt;
-  reg [31:0]           tenths_q;
+  // Sincronizador de 2 flip-flops: btn_i viene de un pad asíncrono.
+  reg [3:0] btn_meta, btn_sync;
 
   always @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      cycles_q  <= 32'b0;
-      tenth_cnt <= {TenthCntW{1'b0}};
-      tenths_q  <= 32'b0;
+      btn_meta <= 4'b0;
+      btn_sync <= 4'b0;
+    end else begin
+      btn_meta <= btn_i;
+      btn_sync <= btn_meta;
+    end
+  end
+
+  debounce4 #(
+    .Ticks   (DebounceTicks),
+    .DivBits (DebounceDivBits)
+  ) u_debounce (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .raw_i   (btn_sync),
+    .clean_o (btn_clean)
+  );
+
+  // CYCLES: contador libre de ciclos a 25 MHz, de solo lectura, sin
+  // start/stop/clear por software.
+  reg [31:0] cycles_q;
+
+  always @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      cycles_q <= 32'b0;
     end else begin
       cycles_q <= cycles_q + 32'd1;
-      if (tenth_cnt == CyclesPerTenth - 1) begin
-        tenth_cnt <= {TenthCntW{1'b0}};
-        tenths_q  <= tenths_q + 32'd1;
-      end else begin
-        tenth_cnt <= tenth_cnt + 1'b1;
-      end
     end
   end
 
@@ -126,7 +125,6 @@ module pochoco_periph #(
       case (off)
         6'd2: rdata_o <= {28'b0, btn_clean}; // Buttons, debounced
         6'd3: rdata_o <= cycles_q;           // CYCLES
-        6'd4: rdata_o <= tenths_q;           // TENTHS
         default: rdata_o <= 32'b0;
       endcase
     end

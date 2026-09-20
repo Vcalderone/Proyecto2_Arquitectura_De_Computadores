@@ -9,10 +9,10 @@
 // - Nicolás Villegas <navillegas@miuandes.cl>
 
 module pochoco_soc #(
-  parameter NumWords       = 512,
-  parameter MemFile        = "../sw/blink.hex",
-  parameter CyclesPerTenth = 2_500_000,
-  parameter DebounceTicks  = 3
+  parameter NumWords        = 512,
+  parameter MemFile         = "../sw/blink.hex",
+  parameter DebounceTicks   = 3,
+  parameter DebounceDivBits = 15
 ) (
   input  wire       i_Clk,
 
@@ -105,8 +105,8 @@ module pochoco_soc #(
   wire [6:0] seg1, seg2;
 
   pochoco_periph #(
-    .CyclesPerTenth (CyclesPerTenth),
-    .DebounceTicks  (DebounceTicks)
+    .DebounceTicks   (DebounceTicks),
+    .DebounceDivBits (DebounceDivBits)
   ) u_periph (
     .clk_i     (clk),
     .rst_ni    (rst_ni),

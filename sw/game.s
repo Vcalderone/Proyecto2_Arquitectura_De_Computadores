@@ -39,7 +39,7 @@
 #     |  espera BTN == 0 (todos sueltos)                      |
 #     |  objetivo <- 2 bits bajos del LFSR                    |
 #     |  LEDS = solo el objetivo                              |
-#     |  t_start <- TENTHS                                    |
+#     |  t0 <- CYCLES   (la marca es en ciclos, no en décimas)|
 #     v                                                       |
 #   WAIT_PRESS                                                |
 #     |  polling de BTN; el LFSR avanza en cada vuelta        |
@@ -49,19 +49,19 @@
 #    sí                        no                             |
 #     v                         v                             |
 #   HIT                       MISS                            |
-#     |  t = TENTHS - t_start    |  display "EE", LEDs off    |
-#     |  satura a MAX_TENTHS     |  espera ERROR_TENTHS ------+
-#     |  suma += t, aciertos++   |                             |
-#     |  display = BCD(t)        |                             |
-#     |  espera MOSTRAR_TENTHS   |                             |
+#     |  t = cyc2tenths(        |  display "EE", LEDs off     |
+#     |        CYCLES - t0)     |  espera ERROR_TENTHS -------+
+#     |  suma += t, aciertos++  |                             |
+#     |  display = BCD(t)       |                             |
+#     |  espera MOSTRAR_TENTHS  |                             |
 #     v                                                        |
 #   ¿aciertos == RONDAS? -- no ---------------------------------+
 #     |
 #    sí
 #     v
 #   FINISH
-#        display "AA" 1 s, luego BCD(suma/10), LEDs parpadeando
-#        una pulsación vuelve a INIT
+#        display "AA" PROMEDIO_TENTHS décimas, luego BCD(suma/RONDAS),
+#        LEDs parpadeando. Una pulsación vuelve a INIT.
 #
 #
 # DECISIONES DE DISEÑO
@@ -93,6 +93,39 @@
 #    16 valores posibles de cada nibble a un carácter. Escribir 0x00 muestra
 #    "00", no apagado.
 #
+# 8. El promedio se calcula con una división genérica por RONDAS, no con un
+#    divisor fijo. La evaluación pide cambiar una constante del juego y volver
+#    a demostrar: con un /10 clavado el promedio queda mal apenas RONDAS deja
+#    de valer 10.
+#
+#
+# BASE DE TIEMPO -- por qué se mide en ciclos
+# -------------------------------------------
+# El SoC expone un solo contador: CYCLES, libre, de 32 bits, +1 por ciclo de
+# reloj a 25 MHz. Toda la conversión a décimas se hace acá en software.
+#
+# Antes había además un contador libre de décimas y se medía leyéndolo. Eso
+# tiene un error sistemático que no se puede corregir desde el software: un
+# contador libre no arranca cuando uno lo lee, así que la marca inicial cae en
+# una fase arbitraria dentro de la décima en curso. Una misma duración real se
+# lee a veces como N y a veces como N+1, y esa décima de incertidumbre no se
+# promedia: está en cada medición y en cada espera. Una espera pedida de 30
+# décimas podía durar 2,9 s, lo que incumple el "al menos tres segundos" del
+# enunciado.
+#
+# Midiendo en ciclos el error de cuantización pasa a ser un ciclo, 40 ns, seis
+# órdenes de magnitud por debajo de la décima que se muestra. Las esperas se
+# convierten a ciclos ANTES de arrancar, así que una espera de 30 décimas dura
+# 3,0 s o un pelo más, nunca menos.
+#
+# Como la base de tiempo ahora vive en software, bajarla para simulación es
+# cambiar una constante al ensamblar:
+#
+#     python3 assembler/asm.py sw/game.s -o sw/game_sim.hex -D CYCLES_PER_TENTH=2500
+#
+# La opción -D del assembler pisa el .equ del archivo, así que no hace falta
+# una segunda copia del programa que se pueda desincronizar de esta.
+#
 #
 # PSEUDOALEATORIEDAD -- LFSR de Galois corriendo a la izquierda
 # ------------------------------------------------------------
@@ -123,20 +156,27 @@
 # MAPA DE REGISTROS (RV32E: solo x0-x15)
 # --------------------------------------
 #   x0        cero
-#   x1        ra de show_bcd y wait_tenths
+#   x1        ra de nivel 1: show_bcd, wait_tenths
 #   x2        base de periféricos 0x80000000      <- vive todo el programa
 #   x3        estado del LFSR                     <- vive todo el programa
 #   x4        POLY                                <- vive todo el programa
 #   x5        aciertos (0..RONDAS)                <- vive todo el programa
 #   x6        suma acumulada en décimas           <- vive todo el programa
 #   x7        máscara del LED objetivo            <- vive la ronda
-#   x8        t_start de la ronda                 <- vive la ronda
+#             (en FINISH se reusa como estado del parpadeo)
+#   x8        t0 de la ronda, EN CICLOS           <- vive la ronda
 #   x9-x14    temporales
-#   x15       ra de div10  (nivel de anidamiento interno)
+#   x15       ra de nivel 2: div, cyc2tenths
+#
+# NINGUNA subrutina escribe x2-x8. Eso es lo que permite que x3 (LFSR), x5
+# (aciertos), x6 (suma), x7 (objetivo) y x8 (t0) sobrevivan a las llamadas sin
+# guardarlos en ningún lado.
 #
 # NO SE USA STACK. Las subrutinas no son recursivas, así que en vez de
 # guardar ra en memoria se usa un registro de enlace distinto por nivel:
-# show_bcd retorna por x1, div10 retorna por x15. Cero memoria, cero sp.
+# show_bcd y wait_tenths retornan por x1, div y cyc2tenths por x15. Como
+# show_bcd llama a div, show_bcd pisa x15: es legal porque show_bcd solo se
+# llama desde el nivel 0. Cero memoria, cero sp.
 #
 # =============================================================================
 
@@ -146,7 +186,16 @@
 .equ ESPERA_TENTHS,  30      # 3,0 s con los cuatro LEDs encendidos
 .equ MOSTRAR_TENTHS, 12      # 1,2 s mostrando el tiempo de reacción
 .equ ERROR_TENTHS,   10      # 1,0 s mostrando "EE"
+.equ PROMEDIO_TENTHS, 10     # 1,0 s mostrando "AA" antes del promedio
+.equ PARPADEO_TENTHS, 5      # medio período del parpadeo final, 0,5 s
 .equ MAX_TENTHS,     99      # saturación: el display son dos dígitos
+
+# --- Base de tiempo ---
+# El assembler no evalúa expresiones, así que CYCLES_PER_TENTH va como
+# literal ya calculado. SI SE CAMBIA CLK_HZ HAY QUE CAMBIAR LOS DOS:
+# CYCLES_PER_TENTH tiene que quedar siempre igual a CLK_HZ / 10.
+.equ CLK_HZ,           25000000
+.equ CYCLES_PER_TENTH,  2500000
 
 # --- Periféricos (ver docs/memory_map.md) ---
 .equ PERIPH_HI,   0x80000    # para el lui: base = 0x80000000
@@ -154,7 +203,6 @@
 .equ OFF_LEDS,    4          # W  [3:0]
 .equ OFF_BTN,     8          # R  [3:0] con debounce
 .equ OFF_CYCLES,  12         # R  [31:0] contador libre a 25 MHz
-.equ OFF_TENTHS,  16         # R  [31:0] contador libre a 10 Hz
 
 # --- Patrones de display ---
 .equ PAT_ERROR,   0xEE       # "EE"
@@ -240,7 +288,8 @@ arm_shift_loop:                    # x7 <- x7 << x9, sin shifter: doblar x9 vece
     j    arm_shift_loop
 arm_shift_done:
     sw   x7, OFF_LEDS(x2)          # enciende solo el LED objetivo
-    lw   x8, OFF_TENTHS(x2)        # t_start
+    lw   x8, OFF_CYCLES(x2)        # t0 en ciclos: unos 3 ciclos después de
+                                   # encender el LED, o sea 120 ns de sesgo
     # cae a wait_press
 
 
@@ -281,21 +330,14 @@ miss:
 # HIT -- pulsación correcta
 # =============================================================================
 hit:
-    lw   x9, OFF_TENTHS(x2)
-    sub  x9, x9, x8                  # t = TENTHS - t_start, resta modular
+    lw   x9, OFF_CYCLES(x2)
+    sub  x10, x9, x8                 # Δ en ciclos, resta modular de 32 bits
+    jal  x15, cyc2tenths             # a0 = décimas, truncado y saturado
 
-    li   x11, MAX_TENTHS
-    blt  x11, x9, hit_saturate        # si MAX_TENTHS < t, saturar
-    j    hit_join
-hit_saturate:
-    li   x9, MAX_TENTHS
-hit_join:
+    add  x6, x6, x10                 # suma += t
+    addi x5, x5, 1                    # aciertos++
 
-    add  x6, x6, x9                   # suma += t
-    addi x5, x5, 1                     # aciertos++
-
-    mv   x10, x9
-    jal  x1, show_bcd
+    jal  x1, show_bcd                 # a0 sigue siendo t
 
     li   x10, MOSTRAR_TENTHS
     jal  x1, wait_tenths
@@ -306,25 +348,28 @@ hit_join:
 
 
 # =============================================================================
-# FINISH -- promedio de las diez rondas
+# FINISH -- promedio de las RONDAS rondas
 # =============================================================================
 finish:
     li   x9, PAT_AVG
     sw   x9, OFF_DISP(x2)
 
-    li   x10, 10
+    li   x10, PROMEDIO_TENTHS
     jal  x1, wait_tenths
 
-    mv   x10, x6                      # a0 = suma
-    jal  x15, div10                    # a0 = cociente = promedio en décimas
+    mv   x10, x6                      # a0 = suma en décimas
+    li   x12, RONDAS                   # divisor = la constante del juego
+    jal  x15, div                       # a0 = promedio en décimas
     jal  x1, show_bcd
 
-    li   x12, 0                        # estado de parpadeo de LEDS
+    li   x7, 0                          # estado del parpadeo de los LEDs.
+                                        # Va en x7 y no en un temporal porque
+                                        # wait_tenths pisa x9-x14.
 finish_blink:
-    xori x12, x12, ALL_LEDS            # alterna entre 0x0 y 0xF
-    sw   x12, OFF_LEDS(x2)
+    xori x7, x7, ALL_LEDS               # alterna entre 0x0 y 0xF
+    sw   x7, OFF_LEDS(x2)
 
-    li   x10, 5                         # medio período, 0,5 s
+    li   x10, PARPADEO_TENTHS
     jal  x1, wait_tenths
 
     lw   x9, OFF_BTN(x2)
@@ -334,30 +379,68 @@ finish_blink:
 
 # =============================================================================
 # SUBRUTINAS
+#
+# Ninguna de estas escribe x2-x8. Ver el mapa de registros de la cabecera.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# div10 -- divide por 10 por resta repetida. Retorna por x15.
+# div -- división entera sin signo por resta repetida. Retorna por x15.
 #
-#   entrada:  a0 = dividendo  (0..990 en este juego)
-#   salida:   a0 = cociente
-#             a1 = resto
+#   entrada:  a0 = dividendo, x12 = divisor
+#   salida:   a0 = cociente, a1 = resto
+#   destruye: x9
 #
-# Sin extensión M ni shifts. El cociente acá nunca pasa de 99, así que el
-# loop hace como mucho 99 vueltas. Se usa dos veces: para el promedio
-# (suma/10) y dentro de show_bcd (separar decenas de unidades).
+# Sin extensión M ni shifts. Genérica a propósito: la usa show_bcd con
+# divisor 10 y finish con divisor RONDAS, que es una constante que la
+# evaluación puede pedir cambiar.
+#
+# La comparación es bltu, sin signo: el dividendo puede ser cualquier patrón
+# de 32 bits y un bit 31 encendido no debe leerse como negativo.
+#
+# Un divisor 0 devuelve cociente 0 y resto = dividendo en vez de colgar la
+# placa en un loop infinito.
 # -----------------------------------------------------------------------------
-div10:
+div:
     li   x9, 0                # cociente
-    li   x12, 10
-div10_loop:
-    blt  x10, x12, div10_done
+    beq  x12, x0, div_done     # divisor 0: salida temprana, sin loop
+div_loop:
+    bltu x10, x12, div_done
     sub  x10, x10, x12
     addi x9, x9, 1
-    j    div10_loop
-div10_done:
+    j    div_loop
+div_done:
     mv   x11, x10              # resto
     mv   x10, x9                # cociente
+    jalr x0, 0(x15)
+
+
+# -----------------------------------------------------------------------------
+# cyc2tenths -- convierte ciclos a décimas. Retorna por x15.
+#
+#   entrada:  a0 = duración en ciclos
+#   salida:   a0 = duración en décimas, truncada hacia abajo y saturada
+#             a MAX_TENTHS
+#   destruye: x9, x12, x13
+#
+# Resta repetida de CYCLES_PER_TENTH, con el loop cortado también por
+# MAX_TENTHS. Ese corte hace dos cosas de una: la saturación sale gratis y el
+# loop da como mucho MAX_TENTHS vueltas por más que el jugador se demore un
+# minuto en apretar.
+#
+# bltu porque la resta CYCLES - t0 es modular y puede tener el bit 31 en 1.
+# -----------------------------------------------------------------------------
+cyc2tenths:
+    li   x9, 0                 # décimas contadas
+    li   x12, CYCLES_PER_TENTH
+    li   x13, MAX_TENTHS
+c2t_loop:
+    beq  x9, x13, c2t_done      # ya saturó, no tiene sentido seguir restando
+    bltu x10, x12, c2t_done     # queda menos de una décima: truncar
+    sub  x10, x10, x12
+    addi x9, x9, 1
+    j    c2t_loop
+c2t_done:
+    mv   x10, x9
     jalr x0, 0(x15)
 
 
@@ -365,17 +448,19 @@ div10_done:
 # show_bcd -- muestra un valor 0..99 como dos dígitos decimales. Retorna por x1.
 #
 #   entrada:  a0 = valor 0..99
+#   destruye: x9, x10, x11, x12, x15
 #
 # El display decodifica HEX por hardware, así que hay que empaquetar BCD:
 # escribir 37 decimal (0x25) mostraría "25". Hay que escribir 0x37.
 #
-#   decenas, unidades <- div10(a0)
+#   decenas, unidades <- div(a0, 10)
 #   byte <- decenas*16 + unidades
 #
 # El *16 sin shift son cuatro duplicaciones encadenadas.
 # -----------------------------------------------------------------------------
 show_bcd:
-    jal  x15, div10             # a0 = decenas, a1 = unidades
+    li   x12, 10
+    jal  x15, div               # a0 = decenas, a1 = unidades
     mv   x9, x10
     add  x9, x9, x9               # x2
     add  x9, x9, x9               # x4
@@ -390,15 +475,33 @@ show_bcd:
 # wait_tenths -- espera N décimas de segundo. Retorna por x1.
 #
 #   entrada:  a0 = número de décimas
+#   destruye: x9, x11, x12, x13, x14
 #
-# TENTHS es libre y no se resetea: se toma una marca y se espera hasta que la
-# diferencia llegue a N. La resta modular de 32 bits funciona aun si el
-# contador da la vuelta.
+# Primero convierte las décimas a ciclos sumando CYCLES_PER_TENTH N veces:
+# no hay multiplicador y la extensión M no existe en este core. N acá vale
+# como mucho unas decenas, así que el loop es despreciable frente a la espera.
+#
+# Después toma una marca de CYCLES y espera hasta que la diferencia alcance el
+# total. La resta es modular, así que funciona aun si el contador da la vuelta,
+# y la comparación es bltu porque esa diferencia no tiene signo.
+#
+# Cuantización: un ciclo, 40 ns. La espera siempre sale igual o un pelo más
+# larga que la pedida, nunca más corta.
 # -----------------------------------------------------------------------------
 wait_tenths:
-    lw   x9, OFF_TENTHS(x2)      # marca inicial
-wait_tenths_loop:
-    lw   x13, OFF_TENTHS(x2)      # marca actual
+    li   x11, 0                   # total en ciclos
+    li   x12, CYCLES_PER_TENTH
+    mv   x13, x10                  # décimas que faltan por acumular
+wt_mul_loop:
+    beq  x13, x0, wt_mul_done
+    add  x11, x11, x12
+    addi x13, x13, -1
+    j    wt_mul_loop
+wt_mul_done:
+
+    lw   x9, OFF_CYCLES(x2)        # marca inicial
+wt_wait_loop:
+    lw   x13, OFF_CYCLES(x2)        # marca actual
     sub  x14, x13, x9
-    blt  x14, x10, wait_tenths_loop
+    bltu x14, x11, wt_wait_loop
     jalr x0, 0(x1)

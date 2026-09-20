@@ -204,12 +204,13 @@ def li_encode(rd, value, lineno):
 
 
 class Assembler:
-    def __init__(self, allow_shifts=False):
+    def __init__(self, allow_shifts=False, defines=None):
         self.allow_shifts = allow_shifts
+        self.defines = dict(defines) if defines else {}
 
     def assemble(self, text):
         lines = parse_lines(text)
-        symtab = {}
+        symtab = dict(self.defines)
         sized = []
         addr = 0
 
@@ -275,6 +276,8 @@ class Assembler:
         name, val_tok = ln.operands
         if not IDENT_RE.match(name):
             raise AssemblerError(ln.lineno, f"nombre de constante inválido: '{name}'")
+        if name in self.defines:
+            return
         value = resolve_value(val_tok, symtab, ln.lineno, "constante")
         self._define_symbol(symtab, name, value, ln.lineno, "constante")
 
@@ -469,8 +472,8 @@ class Assembler:
         raise AssemblerError(lineno, f"mnemónico desconocido: '{m}'")
 
 
-def assemble_text(text, allow_shifts=False):
-    return Assembler(allow_shifts=allow_shifts).assemble(text)
+def assemble_text(text, allow_shifts=False, defines=None):
+    return Assembler(allow_shifts=allow_shifts, defines=defines).assemble(text)
 
 
 def format_hex(words):
@@ -479,10 +482,10 @@ def format_hex(words):
     return "\n".join(f"{w & 0xFFFFFFFF:08x}" for w in words) + "\n"
 
 
-def assemble_file(input_path, output_path, allow_shifts=False):
+def assemble_file(input_path, output_path, allow_shifts=False, defines=None):
     with open(input_path, "r", encoding="utf-8") as f:
         text = f.read()
-    words = assemble_text(text, allow_shifts=allow_shifts)
+    words = assemble_text(text, allow_shifts=allow_shifts, defines=defines)
     with open(output_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(format_hex(words))
     return words
