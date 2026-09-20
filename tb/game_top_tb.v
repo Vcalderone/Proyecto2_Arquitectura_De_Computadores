@@ -5,32 +5,46 @@
 //
 // Course: Arquitectura de Computadores (2026)
 //
-// Testbench de iverilog para game_top: aprieta botones en tiempos
-// guionados (con rebote inyectado) y deja ver en gtkwave que las LEDs
-// solo siguen al valor filtrado, no al crudo. También revisa CYCLES y
-// TENTHS por acceso jerárquico, sin depender de sw/game.s (todavía un
-// esqueleto): el firmware cargado es sw/buttons_leds.hex, uno de los
-// tres tests de oro del assembler, que ya espeja BTN -> LEDS en loop.
+// Testbench de iverilog para game_top: ejerce la cadena de entrada de los
+// botones -- sincronizador de 2 flip-flops (rtl/pochoco_periph.v) y
+// debounce (rtl/debounce.v) -- apretando botones en tiempos guionados con
+// rebote inyectado, y comprueba que las LEDs solo sigan al valor filtrado,
+// nunca al crudo. También revisa CYCLES por acceso jerárquico.
 //
-// CyclesPerTenth se pisa a 25 (en vez de 2 500 000) para que TENTHS
-// avance a un ritmo observable en simulación, tal como exige el
-// contrato de docs/memory_map.md. DebounceTicks se deja en su default
-// (3): el tick de muestreo es de 2^15 ciclos, así que igual corre en
-// segundos de wall-clock, no minutos.
+// No sabe nada del juego: el firmware cargado es sw/buttons_leds.hex, uno
+// de los tres tests de oro del assembler, que espeja BTN -> LEDS en loop.
+// La máquina de estados del juego la cubre tb/game_tb.v.
 //
-// Correr desde la raíz de pochoco_soc/ (Icarus resuelve $readmemh
-// relativo al cwd del proceso, no al archivo fuente):
-//   iverilog -g2012 -o /tmp/game_top_tb tb/game_top_tb.v rtl/*.v rtl/espino_core/*.v
-//   vvp /tmp/game_top_tb
+// DebounceDivBits se pisa a 10 (tick cada 2^10 = 1024 ciclos, en vez de
+// 2^15 = 32768) para que el testbench corra rápido, y los pulsos de rebote
+// inyectados van escalados a esa misma base: un rebote tiene que ser corto
+// FRENTE AL TICK, no corto en valor absoluto, o deja de ser un rebote.
+//
+// El tick viene de un contador libre de DivBits bits, así que una ventana
+// de N*TICK ciclos contiene exactamente N ticks. De ahí salen los dos
+// márgenes que usa este testbench:
+//   - SETTLE = 4*TICK  -> 4 ticks >= los 3 (DebounceTicks) que hacen falta
+//     para aceptar un cambio: garantiza que el valor final ya se asentó.
+//   - Toda la secuencia de rebote dura menos de un TICK, así que como mucho
+//     una muestra cae dentro del rebote. Con 3 muestras necesarias, ni el
+//     rebote ni un tick posterior alcanzan a mover clean_o.
+//
+// Correr desde la raíz del proyecto (Icarus resuelve $readmemh relativo al
+// cwd del proceso, no al archivo fuente). Con `make sim`, o a mano:
+//   iverilog -g2012 -o build/game_top_tb tb/game_top_tb.v rtl/*.v \
+//            rtl/espino_core/*.v $(yosys-config --datdir)/ice40/cells_sim.v
+//   vvp build/game_top_tb
 //   gtkwave game_top_tb.vcd
 
 `timescale 1ns/1ps
 
 module game_top_tb;
 
-  localparam CLK_PERIOD = 40;      // 25 MHz
-  localparam TICK       = 32768;   // ciclos por muestra del debounce
-  localparam SETTLE     = 4 * TICK; // >= 3 ticks de estabilidad, con margen
+  localparam CLK_PERIOD  = 40;        // 25 MHz
+  localparam DIV_BITS    = 10;
+  localparam TICK        = 1 << DIV_BITS; // ciclos por muestra del debounce
+  localparam SETTLE      = 4 * TICK;      // >= 3 ticks de estabilidad, con margen
+  localparam BOUNCE      = 20;            // ancho de cada pulso de rebote
 
   reg        clk;
   reg  [3:0] switch;
@@ -41,8 +55,8 @@ module game_top_tb;
   integer errors;
 
   game_top #(
-    .MemFile        ("sw/buttons_leds.hex"),
-    .CyclesPerTenth (25)
+    .MemFile         ("sw/buttons_leds.hex"),
+    .DebounceDivBits (DIV_BITS)
   ) dut (
     .i_Clk        (clk),
     .o_LED        (led),
@@ -60,9 +74,8 @@ module game_top_tb;
   );
 
   // Acceso jerárquico a estado interno, solo para verificación/gtkwave.
-  // No hace falta que game.s/game.hex exista para esto.
   wire [31:0] cycles_q  = dut.u_soc.u_periph.cycles_q;
-  wire [31:0] tenths_q  = dut.u_soc.u_periph.tenths_q;
+  wire [3:0]  btn_sync  = dut.u_soc.u_periph.btn_sync;
   wire [3:0]  btn_clean = dut.u_soc.u_periph.btn_clean;
 
   always #(CLK_PERIOD/2) clk = ~clk;
@@ -74,7 +87,18 @@ module game_top_tb;
     end
   endtask
 
-  task check4(input [3:0] expected, input [127:0] label);
+  task check(input ok_in, input [8*128-1:0] label);
+    begin
+      if (!ok_in) begin
+        $display("FAIL @%0t: %0s", $time, label);
+        errors = errors + 1;
+      end else begin
+        $display("ok   @%0t: %0s", $time, label);
+      end
+    end
+  endtask
+
+  task check4(input [3:0] expected, input [8*128-1:0] label);
     begin
       if (led !== expected) begin
         $display("FAIL @%0t: %0s -- o_LED=%b, esperado %b", $time, label, led, expected);
@@ -98,21 +122,42 @@ module game_top_tb;
     wait_cycles(64);
     check4(4'b0000, "reposo tras reset");
 
+    // --- Sincronizador de 2 flip-flops ----------------------------------
+    // btn_i viene de un pad asíncrono y entra al debounce a través de
+    // btn_meta/btn_sync. Dos flancos después de mover i_Switch, btn_sync
+    // ya tiene que reflejarlo; btn_clean no, porque le faltan 3 ticks (y
+    // en 2 ciclos cae como mucho 1).
+    switch = 4'b0100;
+    wait_cycles(2);
+    #1;   // epsilon: deja que se apliquen las asignaciones no bloqueantes
+          // del segundo flanco antes de muestrear
+    check(btn_sync  === 4'b0100, "sincronizador: btn_sync sigue a i_Switch en 2 ciclos");
+    check(btn_clean === 4'b0000, "sincronizador: btn_clean todavia no se movio");
+
+    // Se suelta enseguida: el pulso es mucho más corto que 3 ticks, así que
+    // tampoco debe llegar nunca a las LEDs.
+    switch = 4'b0000;
+    wait_cycles(SETTLE);
+    check4(4'b0000, "pulso de 2 ciclos filtrado: LEDs nunca se movieron");
+
     // --- Boton 0: rebote antes de asentar en 1 -------------------------
-    switch[0] = 1'b1; wait_cycles(500);
-    switch[0] = 1'b0; wait_cycles(500);
-    switch[0] = 1'b1; wait_cycles(500);
-    switch[0] = 1'b0; wait_cycles(500);
+    // Toda la secuencia dura 4*BOUNCE = 80 ciclos, bastante menos que un
+    // TICK, así que como mucho una muestra cae en pleno rebote.
+    switch[0] = 1'b1; wait_cycles(BOUNCE);
+    switch[0] = 1'b0; wait_cycles(BOUNCE);
+    switch[0] = 1'b1; wait_cycles(BOUNCE);
+    switch[0] = 1'b0; wait_cycles(BOUNCE);
     switch[0] = 1'b1;                       // valor final: apretado
-    wait_cycles(2 * TICK);                  // aun dentro de la ventana de rebote
+    wait_cycles(TICK);                      // 1 tick más: 2 muestras en 1 como
+                                            // mucho, y hacen falta 3
     check4(4'b0000, "boton 0 en pleno rebote, LED todavia no debe moverse");
 
     wait_cycles(SETTLE);
     check4(4'b0001, "boton 0 asentado -> LED0 encendido");
 
     // --- Boton 0: suelta con rebote -------------------------------------
-    switch[0] = 1'b0; wait_cycles(500);
-    switch[0] = 1'b1; wait_cycles(500);
+    switch[0] = 1'b0; wait_cycles(BOUNCE);
+    switch[0] = 1'b1; wait_cycles(BOUNCE);
     switch[0] = 1'b0;
     wait_cycles(SETTLE);
     check4(4'b0000, "boton 0 soltado y asentado -> LEDs apagadas");
@@ -123,8 +168,10 @@ module game_top_tb;
     check4(4'b1010, "botones 1 y 3 -> LED1 y LED3 encendidas");
 
     // --- Pulsacion sostenida corta (rebote), no debe leerse como cambio --
-    switch[1] = 1'b0; wait_cycles(200);
-    switch[1] = 1'b1; wait_cycles(200);
+    // Un cero suelto deja el registro de desplazamiento con valores mixtos:
+    // ni set (&sr) ni clr (~|sr), así que clean_o retiene.
+    switch[1] = 1'b0; wait_cycles(BOUNCE);
+    switch[1] = 1'b1; wait_cycles(BOUNCE);
     check4(4'b1010, "glitch mas corto que un tick -> sin efecto en LEDs");
 
     switch = 4'b0000;
@@ -145,27 +192,12 @@ module game_top_tb;
       end
     end
 
-    // --- TENTHS: con CyclesPerTenth=25, debe avanzar 1 cada 25 ciclos -----
-    begin : tenths_check
-      reg [31:0] t0, t1;
-      integer    n_periods;
-      t0 = tenths_q;
-      n_periods = 40;                 // 40 * 25 = 1000 ciclos
-      wait_cycles(n_periods * 25);
-      t1 = tenths_q;
-      if (t1 - t0 !== n_periods) begin
-        $display("FAIL: TENTHS avanzo %0d en %0d periodos, esperado %0d",
-                  t1 - t0, n_periods, n_periods);
-        errors = errors + 1;
-      end else begin
-        $display("ok   : TENTHS avanzo exactamente %0d en %0d ciclos", n_periods, n_periods * 25);
-      end
+    if (errors == 0) begin
+      $display("\n=== PASS: todos los checks OK ===");
+      $finish;
+    end else begin
+      $fatal(1, "\n=== FAIL: %0d check(s) fallaron ===", errors);
     end
-
-    if (errors == 0) $display("\n=== PASS: todos los checks OK ===");
-    else              $display("\n=== FAIL: %0d check(s) fallaron ===", errors);
-
-    $finish;
   end
 
 endmodule

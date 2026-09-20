@@ -121,7 +121,7 @@
 # Como la base de tiempo ahora vive en software, bajarla para simulación es
 # cambiar una constante al ensamblar:
 #
-#     python3 assembler/asm.py sw/game.s -o sw/game_sim.hex -D CYCLES_PER_TENTH=250
+#     python3 assembler/asm.py sw/game.s -o sw/game_sim.hex -D CYCLES_PER_TENTH=2500
 #
 # La opción -D del assembler pisa el .equ del archivo, así que no hace falta
 # una segunda copia del programa que se pueda desincronizar de esta.

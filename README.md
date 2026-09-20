@@ -45,16 +45,20 @@ make all
 
 ## Software
 
-The `sw/` folder holds the RV32E assembly example programs that run on the Espino Core (`blink.s`, `7seg.s`, `buttons_leds.s`), plus a `Makefile` to assemble them into the `.hex` files the RTL loads at boot via `$readmemh`.
+The `sw/` folder holds the RV32E assembly programs that run on the Espino Core: the reflex game itself (`game.s`) plus the three examples that ship with the SoC (`blink.s`, `7seg.s`, `buttons_leds.s`). They are assembled into the `.hex` files the RTL loads at boot via `$readmemh`.
 
-You'll need a RISC-V toolchain on your `PATH` (`riscv64-unknown-elf-{as,ld,objcopy}` on Debian/Ubuntu/WSL via `sudo apt install gcc-riscv64-unknown-elf`, or `brew install riscv64-unknown-elf-gcc` on macOS). If your toolchain uses a different prefix, override it on the command line rather than editing the Makefile:
+**No external RISC-V toolchain is ever invoked.** Assembling is done by our own assembler, `assembler/asm.py`, driven from the root `Makefile`. (The old `sw/Makefile` called `riscv64-unknown-elf-as`, and its `%.hex: %.s` rule also matched `game.s` -- so a stray `make` inside `sw/` would have rebuilt the game firmware with the very tool the assignment forbids. It was removed; our assembler reproduces all three example `.hex` files byte for byte, which `assembler/tests/test_golden.py` checks.)
 
 ```bash
-cd sw
-make blink                        # assembles blink.s -> blink.hex
-make PREFIX=riscv64-elf- blink    # if your toolchain uses a different prefix
+make asm        # sw/game.s   -> sw/game.hex   (the firmware baked into the bitstream)
+make asm-all    # every sw/*.s -> its .hex
+make test       # assembler test suite, golden .hex comparisons included
+make sim        # both testbenches + the RONDAS=4 regression run
+make check      # test + sim
 ```
 
-Drop a new `<name>.s` file in `sw/` and `make <name>` picks it up automatically, no `Makefile` changes needed. Don't forget to change the MemFile in pochoco_soc.v.
+Drop a new `<name>.s` file in `sw/` and the generic `sw/%.hex: sw/%.s` rule picks it up automatically, no `Makefile` changes needed. Don't forget to change the MemFile in pochoco_soc.v.
+
+`make sim` needs `iverilog` and the iCE40 cell models (`ice40/cells_sim.v`) that ship with yosys, because `espino_register_file.v` instantiates `SB_RAM40_4K`. The Makefile looks for them under `yosys-config --datdir`, then `/usr/share/yosys`, then `/usr/local/share/yosys`; if yosys came from somewhere else, point at them directly with `make sim CELLS_SIM=/path/to/ice40/cells_sim.v`.
 
 **CATCH:** The core implements [RV32E](https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html), with one thing worth knowing: shift instructions (`SLL`/`SRL`/`SRA`/`SLLI`/`SRLI`/`SRAI`) are decoded correctly but disabled in the ALU to save LUTs on the target FPGA, so they currently execute as `ADD` instead. Avoid shifts in your assembly, or design your own shifter...
