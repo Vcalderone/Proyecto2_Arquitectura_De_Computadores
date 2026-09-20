@@ -8,14 +8,14 @@
 // Top level del juego: instancia pochoco_soc con el firmware del juego
 // y expone exactamente los pines de la Go Board (ver goboard.pcf). Los
 // parámetros quedan pasantes para que el testbench pueda reducir
-// CyclesPerTenth (y opcionalmente DebounceTicks) y correr las diez
+// DebounceDivBits (y opcionalmente DebounceTicks) y correr las diez
 // rondas en segundos de simulación en vez de minutos.
 
 module game_top #(
-  parameter NumWords       = 512,
-  parameter MemFile        = "sw/game.hex",
-  parameter CyclesPerTenth = 2_500_000,
-  parameter DebounceTicks  = 3
+  parameter NumWords        = 512,
+  parameter MemFile         = "sw/game.hex",
+  parameter DebounceTicks   = 3,
+  parameter DebounceDivBits = 15
 ) (
   input  wire       i_Clk,
 
@@ -36,8 +36,8 @@ module game_top #(
   pochoco_soc #(
     .NumWords       (NumWords),
     .MemFile        (MemFile),
-    .CyclesPerTenth (CyclesPerTenth),
-    .DebounceTicks  (DebounceTicks)
+    .DebounceTicks   (DebounceTicks),
+    .DebounceDivBits (DebounceDivBits)
   ) u_soc (
     .i_Clk        (i_Clk),
 
