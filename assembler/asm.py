@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core import assemble_file  # noqa: E402
+from core import IDENT_RE, assemble_file, parse_number  # noqa: E402
 from errors import AssemblerError  # noqa: E402
 
 
@@ -32,13 +32,33 @@ def main(argv=None):
         action="store_true",
         help="permite sll/srl/sra/slli/srli/srai (la ALU los ejecuta como ADD en este core; usar bajo tu propio riesgo)",
     )
+    parser.add_argument(
+        "-D",
+        "--define",
+        action="append",
+        default=[],
+        metavar="NOMBRE=VALOR",
+        help="fija una constante desde la línea de comandos y pisa el .equ del archivo con ese nombre (repetible)",
+    )
     args = parser.parse_args(argv)
+
+    defines = {}
+    for item in args.define:
+        name, sep, val = item.partition("=")
+        if not sep or not IDENT_RE.match(name):
+            print(f"error: -D '{item}': se esperaba NOMBRE=VALOR", file=sys.stderr)
+            return 1
+        try:
+            defines[name] = parse_number(val)
+        except ValueError:
+            print(f"error: -D '{item}': valor no numérico '{val}'", file=sys.stderr)
+            return 1
 
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output else input_path.with_suffix(".hex")
 
     try:
-        words = assemble_file(input_path, output_path, allow_shifts=args.allow_shifts)
+        words = assemble_file(input_path, output_path, allow_shifts=args.allow_shifts, defines=defines)
     except AssemblerError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
