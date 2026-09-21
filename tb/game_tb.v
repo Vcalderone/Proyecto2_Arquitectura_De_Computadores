@@ -352,8 +352,10 @@ module game_tb;
     $display("== game_tb: MEMFILE=%0s, RONDAS=%0d, reaccion inyectada=%0d decimas ==",
              `MEMFILE, RONDAS, REACTION_TENTHS);
 
-    // Deja pasar el power-on reset interno de pochoco_soc (16 ciclos) más
-    // la inicialización de _start/start_screen.
+    // Deja pasar el power-on reset interno de pochoco_soc más la
+    // inicialización de _start/start_screen. Se espera a rst_ni en vez de
+    // contar ciclos para no depender de cuánto dura el reset.
+    wait (dut.u_soc.rst_ni);
     wait_cycles(200);
 
     // === START_SCREEN ===================================================

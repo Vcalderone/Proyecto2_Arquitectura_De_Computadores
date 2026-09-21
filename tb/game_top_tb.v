@@ -117,8 +117,10 @@ module game_top_tb;
     clk    = 1'b0;
     switch = 4'b0000;
 
-    // Deja pasar el power-on reset interno de pochoco_soc (16 ciclos)
-    // más unas vueltas del loop de buttons_leds.s.
+    // Deja pasar el power-on reset interno de pochoco_soc más unas vueltas
+    // del loop de buttons_leds.s. Se espera a rst_ni en vez de contar
+    // ciclos para no depender de cuánto dura el reset.
+    wait (dut.u_soc.rst_ni);
     wait_cycles(64);
     check4(4'b0000, "reposo tras reset");
 
